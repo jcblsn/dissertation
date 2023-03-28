@@ -1,2 +1,3 @@
 # dissertation
-LaTeX, code, and data for my master's dissertation: "Estimating the causal effect of Germany’s 2021 nuclear power plant closures on electricity generation using Gaussian process regression"
+
+[![License: CC BY-SA 4.0](https://img.shields.io/badge/License-CC_BY--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-sa/4.0/)
