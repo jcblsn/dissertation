@@ -1,0 +1,855 @@
+---
+title: Estimating the Causal Effect of Germany's 2021 Nuclear Plant Closures on Electricity Generation Using Gaussian Process Regression
+format:
+  pdf:
+    papersize: A4
+    citecolor: black
+    # cite-method: natbib
+    extra_dependencies: ["float"] # for plots
+    geometry:
+      - left=3.5cm
+      - right=2cm
+    toc: true
+    lof: true
+    lot: true
+    linkcolor: black
+    hyperref: false
+    fontsize: 11pt
+    classoption: fleqn # for katex
+    number-sections: true
+    # • line spacing minimum 1.5,
+    template-partials:
+      - before-body.tex
+      - biblio.tex
+    include-before-body: 
+        text: |
+            \pagenumbering{roman}
+    include-in-header: 
+        text: |
+            \usepackage{fvextra,amsmath,amssymb,amsfonts,amsthm}
+            \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+            \DefineVerbatimEnvironment{OutputCode}{Verbatim}{breaklines,commandchars=\\\{\}}
+bibliography: dissertation-references.bib
+csl: harvard.csl # https://www.zotero.org/styles
+logo: logo.png
+note: Submitted for the Master of Science, London School of Economics, University of London
+# note to self re template partials
+# https://quarto.org/docs/journals/templates.html
+
+# plus repo with default files
+# https://github.com/quarto-dev/quarto-cli/tree/main/src/resources/formats/pdf/pandoc
+---
+
+{{< pagebreak >}}
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "")
+options(scipen = 999)
+
+library(tidyverse)
+library(lubridate)
+
+g <- read_csv(file.path(getwd(), "../", "data", "clean", "g_monthly.csv")) |> filter(as_date(t) < as_date('2023-01-01'))
+ffg <- read_csv(file.path(getwd(), "../", "data", "clean", "ffg_monthly.csv")) |> filter(as_date(t) < as_date('2023-01-01'))
+
+UNIT_OF_INTEREST = "MWh"
+MWH_TO_TWH = 1e-6
+N_CONTROL_COUNTRIES <- length(unique(ffg$country)) - 1
+N_TIME_PERIODS <- 96
+N_AUX_VARS <- 1
+T_0_DATE = lubridate::as_date('2021-12-31')-7 # replace with date concluding last period before closure
+T_0_PLUS_1_DATE = lubridate::as_date('2021-12-31')
+T_DATE = lubridate::as_date('2022-12-31')
+
+T_0 = 84
+T_1 = 12 
+T = T_0 + T_1
+
+
+did_control_countries <- read_csv(file.path(getwd(), "../", "data", "clean", "did_control_countries.csv")) |>
+  pull(country) |> sort()
+did_model_results <- read_csv(file.path(getwd(), "../", "data", "clean", "did_model_results.csv")) |>
+  mutate(estimate = estimate,
+  std.error = std.error)
+```
+
+# Summary {.unnumbered}
+
+This study examines the repercussions of Germany's 2021 nuclear power plant closures on its fossil fuel electricity generation in 2022 using a dataset documenting European electricity generation from 2015-2022. Four causal inference methodologies were employed: differences-in-differences, synthetic control, Bayesian structural time series, and Gaussian process regression. The goal was to determine the extent of potentially increased reliance on fossil fuels following the nuclear phase-out. The research integrates monthly electricity generation figures from various European countries and incorporates average temperature as a control variable to account for weather-related seasonality.
+
+The analysis reveals no evidence for an increase in Germany's fossil fuel electricity generation in 2022 as a result of the nuclear plant shutdowns. Among the models applied, Gaussian process regression stood out due to its nonparametric quality and Bayesian uncertainty quantification, complemented by a novel technique for automated feature selection. Contrary to popular anticipation as a result of past research focused on previous closures, the results challenge the preconceived notion of an inherent rise in fossil fuel utilization post-nuclear phase-out.
+
+Methodologically, the study highlights the utility of combining flexible Bayesian modeling with more established causal inference techniques. In summary, this investigation not only offers valuable insights into the dynamics of energy transitions but also underscores the importance and potential of data-driven causal inference in understanding such shifts. The paper concludes with recommendations for more detailed exploratory studies incorporating richer datasets and enhanced modeling techniques in the future.
+
+{{< pagebreak >}}
+
+\pagenumbering{arabic}
+
+# Introduction {#sec-introduction} 
+<!-- Description: "introductory section that should include the aims of the study and a brief outline of the main sections of the dissertation." -->
+
+## Background and Context {.unnumbered}
+<!-- Briefly introduce the topic of nuclear power in Germany and the decision to close nuclear power plants in 2021. -->
+<!-- Discuss the importance of understanding the impact of these closures on electricity generation from fossil fuel sources. -->
+
+Nuclear power has played a complex role in Germany's energy landscape over the past several decades. The country's first commercial nuclear reactor began construction in 1961, marking the beginnings of a nascent civilian nuclear industry. Through the 1960s and 1970s, nuclear energy capacity expanded as Germany, like other industrialized nations, pursued atomic power as a source of economic growth and energy security. By the 1980s, nuclear generated a substantial portion of Germany's electricity needs. However, even as the technology rapidly expanded, so did public skepticism and resistance. The roots of Germany's anti-nuclear movement emerged in the 1970s over concerns about radioactive waste disposal, safety, and local environmental impacts. Public opposition escalated sharply following the 1986 Chernobyl disaster, which directly contaminated parts of Germany and fueled anxiety about the risks of nuclear technology.
+
+Against this backdrop, Germany's government decided in 2000 to phase out nuclear power completely by the early 2020s. The phase-out plan involved gradually shutting down all of the country's nuclear plants according to a decades-long unwinding scheme. However, in the late 2000s and early 2010s, efforts emerged to slow down the phase-out as part of climate change mitigation strategies focused on reducing fossil fuels. But the 2011 Fukushima nuclear accident in Japan abruptly reversed course. It prompted Chancellor Angela Merkel to return to the original phase-out policy, with eight nuclear plants closed immediately. Additional reactors ceased operations in 2015, 2017, 2019, in December 2021, and in 2023. The 2021 closures of three of the six remaining plants—seen by some to contribute to unusually high energy costs during 2022 after Russia cut off gas supplies to Europe—are the specific focus of this analysis.
+
+The history of nuclear power in Germany has thus traversed changing political and public attitudes. The 2021 shutdowns mark the culmination of a decades-long societal debate over the merits and risks of atomic energy. Understanding the impacts of phasing out this major energy source remains an open question with implications for nuclear policy and climate change goals alike. This study aims to shed light on these complex dynamics.
+
+## Research Question {.unnumbered}
+
+This analysis focuses on estimating the causal effect of Germany's 2021 nuclear plant closures on the country's electricity generation from fossil fuel sources during the year 2022. Specifically, it asks the question: How did the shutdown of Germany's last operating nuclear reactors in December 2021 impact fossil fuel electricity generation in 2022 compared to the counterfactual scenario without the closures? 
+
+## Methodological Overview {.unnumbered}
+<!-- Provide a brief overview of the methodologies you will use (Differences-in-Differences, BSTS, Gaussian Process Regression) without going into too much detail (as this will be covered in the Methods section). -->
+
+Germany's energy transition and nuclear phase-out present a complex setting with limited comparable case studies. Isolating the effect of the 2021 closures is challenging amidst contemporaneous shocks and the cumulative impacts of prior nuclear reductions. Controlling for all relevant factors using traditional regression techniques could prove inadequate. This study therefore implements multiple state-of-the-art causal inference methods, leveraging their complementary strengths and limitations. These include differences-in-differences, synthetic control modeling, Bayesian structural time series, and Gaussian process regression. The diversity of techniques provides analytical triangulation while exploring innovative applications of these approaches. Ultimately, the goal is two-fold: to produce substantively meaningful insights into the nuclear closures' impacts and to refine methodological practice in causal analysis of observational time series data.
+
+The differences-in-differences approach compares changes in fossil fuel electricity generation in Germany before and after the closures relative to other control countries. DiD assumes parallel pre-treatment trends between groups. Violations of this can bias results, while matching on pre-treatment trends can help satisfy this assumption. However, DiD cannot capture complex temporal dynamics.
+
+The synthetic control method constructs a weighted combination of control units that approximates the pre-treatment characteristics of the treated unit. The effect is estimated by comparing their post-treatment difference. This data-driven approach relaxes assumptions but lacks inherent uncertainty quantification. 
+
+Bayesian structural time series models decomposes time series into trends, seasonality, and regression components using a state space framework. This provides a flexible approach to prediction but relies on modeling assumptions. Bayesian inference naturally quantifies uncertainty.
+
+Gaussian process regression directly models the outcome variable using a nonparametric Gaussian process prior distribution. This flexibility avoids restrictive assumptions while offering principled uncertainty estimates. Automatic relevance determination is utilized for input variable selection to prevent overfitting.
+
+Applying these complementary methods together gives an additive sort of clarity towards the topic at hand while examining their comparative strengths and limitations in context.
+
+## Significance {.unnumbered}
+
+This study makes both substantive and methodological contributions. 
+
+Substantively, quantifying the impacts of Germany's 2021 nuclear closures provides insights relevant to policymakers and analysts alike. Understanding the empirical effects on fossil fuel reliance informs debates around nuclear phase-outs, energy security, and climate change mitigation. The results also offer potential lessons for other countries considering reducing nuclear power.
+
+Methodologically, this analysis demonstrates innovative applications of causal inference techniques using observational time series data. It elucidates the relative merits of differences-in-differences versus synthetic controls versus flexible Bayesian approaches. Implementing multiple methods enables helps uncover more of the truth about the the question at hand than a single approach would while expanding the toolkit for other applied researchers. In particular, the use of Gaussian process regression with principled input variable selection showcases an underexplored approach in this domain.
+
+Overall, this study aims to generate new evidence and methodological learnings valuable from both an empirical and technical perspective. Rigorously estimating the causal effect of Germany's nuclear policy shifts on fossil fuel generation makes contributions on multiple fronts.
+
+## Outline {.unnumbered}
+
+The remainder of the paper proceeds as follows:
+
+The Literature Review situates this study in the context of prior research on electricity generation, Germany's energy transition, and methods for causal inference with time series data.
+
+The Data section describes the panel dataset used covering fossil fuel electricity generation and relevant predictors across European countries over time.
+
+The Methods section provides technical details on the implementation of the four causal inference approaches: differences-in-differences, synthetic control modeling, Bayesian structural time series, and Gaussian process regression.
+
+The Results section presents findings from each method, including graphical representations of the counterfactual predictions and treatment effect estimates. 
+
+The Discussion compares and contrasts the results obtained across techniques, focusing on their complementary strengths and limitations.
+
+Finally, the Conclusion summarizes the key takeaways, reflects on the substantive and methodological implications, acknowledges limitations, and suggests directions for future work.
+
+{{< pagebreak >}}
+
+# Literature Review {#sec-literature-review}
+
+## Subject Review
+
+### Electricity Generation {.unnumbered}
+
+Electricity generation is influenced by a myriad of factors, including resource availability, technological advancements, and policy directives. The portfolio of resources for power generation typically spans both nonrenewable sources such as coal, gas, and nuclear, and renewable ones like wind, solar, and hydropower. Governments, through their policy and regulatory frameworks, can either promote or deter specific energy forms. For instance, the global push towards renewable energy is driven by the imperative to reduce reliance on environmentally detrimental fossil fuels, which has direct implications for electricity generation from these sources [@UN].
+
+Managing the electricity grid requires a balance between supply and demand. This entails methodologies like load forecasting, prioritizing power plants based on their marginal costs, and assimilating renewable energy inputs. The increasing integration of renewable energy introduces variability to grid management. To mitigate this, strategies encompassing energy storage, demand response, and power import/export mechanisms are deployed [@Alquthami2022APC]. The dynamics of the wholesale electricity market, which modulates electricity prices in response to supply-demand fluctuations, can also influence the extent to which fossil fuels are used for electricity generation [@Michaelides2019FossilFS].
+
+### Energy Mix in Germany {.unnumbered}
+
+Germany's energy landscape offers insights relevant to the study's focus. The nation's "Energiewende" policy underscores its commitment to transitioning towards a more sustainable energy paradigm [@Heering2021GermanysEA]. Historically anchored in coal and nuclear energy, Germany's energy landscape has been undergoing a transformative shift with an eye towards climate change mitigation.
+
+By the mid-2020s, renewable energy sources began to dominate Germany's electricity generation. This shift is attributed to substantial investments in wind and solar energy, catalyzed by state-backed incentives [@Wehrle2022TheCO]. However, despite the rise of renewables, natural gas and coal remain significant for ensuring a reliable electricity supply, especially during peak demand or renewable downtimes [@fossilreliability]. This reliance on fossil fuels, in the absence of nuclear energy, is central to the research question of this paper.
+
+The orchestration of Germany's electricity grid is steered by multiple transmission system operators (TSOs). Their mandate encompasses real-time demand forecasting, power plant scheduling, and renewable energy integration. With the renewable quotient on an upward trajectory, TSOs are channeling investments into grid modernization and pioneering technologies to manage the sporadic nature of wind and solar energy [@Ernst2009WindPA]. The interconnectedness of Germany's energy infrastructure with neighboring nations also plays a role in its energy mix, influencing the extent to which fossil fuels are used for electricity generation [@Rocholl2016BerlinsED].
+
+### Nuclear Energy in Germany {.unnumbered}
+
+The history of nuclear energy capacity in Germany dates back to the 1960s and has gone through several phases [@Hfner2019TheFI]. Initially, nuclear policy was central to German industrial policy and national energy policy, and later, to environmental policy [@Mez2020]. Following the development of civilian nuclear power in the US, USSR, UK, and France, German nuclear plants began coming online in the 1960s and increased in number and technical sophistication through the 1980s [@IAEAPRIS]. However, the young industry began to fade as quickly as it had grown [@Hfner2019TheFI].
+
+![History of electricity generation capacity from nuclear power in Germany](../plots/2023-08-23-chart_nuclear_generation_history.png){#fig-nuclear-history}
+
+Anti-nuclear sentiment started to grow around the same time as the first plans came online [@Nelkin1980PoliticalPA]. Activists were principally concerned with waste disposal but the cause quickly became associated with a larger political movement due to clashes with police and local governments. Public opinion was trending negative but was galvanized after much of Germany was exposed to radioactive fallout from the Chernobyl disaster in 1986 [@Nelkin1980PoliticalPA]. As told in @green_industrial_restructuring's Green Industrial Restructuring, the last new German nuclear plant was ordered in 1975 and activated in 1989; "since then no new nuclear power plants have been planned." After Chernobyl, the industry's focus pivoted from expanding the number of reactors towards "improving the performance of existing reactors through upgrading, refurbishment, and managerial changes" @green_industrial_restructuring.
+
+The overall political landscape in the 1990s, especially with the Green Party's ascent to the federal government post-reunification, bolstered the anti-nuclear stance [@legality_phaseout]. Succumbing to the mounting political and public pressure, the German government legislated a nuclear phase-out by 2021 in 2000 [@legality_phaseout], leading to the decommissioning of the first plant in 2003 [@IAEAPRIS]. However, the phase-out trajectory faced opposition in the late 2000s, primarily from a coalition spearheaded by the Christian Democrat party [@legality_phaseout]. They underscored the role of nuclear energy in achieving Germany's climate objectives [@Norman_Sweeney_2010]. Amidst significant public dissent, the phase-out deadline was extended to 2036 [@phaseoutpostpone].
+
+At the time of the Fukushima earthquake, nuclear power constituted one-quarter of Germany's electricity supply. However, the disaster was nonetheless a death blow to the industry. The events in Japan reignited public protests on an unprecedented scale and compelled the German government to reconsider its stance [@response-to-fukushima]. A mere three days post-Fukushima, Prime Minister Angela Merkel announced a renewed commitment to the original phase-out plan. 
+
+The sequence of nuclear plant closures since 2011 [@IAEAPRIS] is as follows:
+
+1. 2011: Immediate shutdown of eight nuclear power plants post-Fukushima, including Neckarwestheim 1, Biblis A and B, Brunsbüttel, Isar 1, Unterweser, Philippsburg 1, and Krümmel.
+2. 2015: Grafenrheinfeld was decommissioned.
+3. 2017: Gundremmingen B was decommissioned.
+4. 2019: Philippsburg 2 was decommissioned.
+5. 2021: Grohnde, Gundremmingen C, and Brokdorf were decommissioned.
+6. 2023: The final three plants, Isar 2, Emsland, and Neckarwestheim 2 are decommissioned following a delay due to the 2022 Russian invasion of Ukraine [@Alkousaa_2023]
+
+The 2021 closures are the focus of this paper.
+
+A recent study by @Jarvis2019 analyzed the impacts of Germany's nuclear phase-out following the 2011 Fukushima disaster. Using a machine learning approach on plant-level data, they estimated that the lost nuclear generation was replaced primarily by increased output from coal plants and electricity imports. This resulted in higher emissions of CO2 and local air pollutants, increasing mortality risk from exposure. The study contrasts with this one in that it focuses on the 2011 closures and uses a different methodology for its period of consideration, which takes place prior to when ENTSO-E data is available. It is the single most useful point of comparison for the results obtained here.
+
+## Methods Review
+
+The question I hope to answer can be characterized as a causal inference problem for time-series cross-sectional data [as usefully described in @carlson2020GPP]. To contextualize my methodological choices, I will review relevant literature on select approaches to questions following this general framework.
+
+### Differences-in-Differences {.unnumbered}
+
+Differences-in-differences is a quasi-experimental approach commonly used to estimate the causal effect of a policy intervention or treatment [@NBERw22791]. It involves comparing the change over time in an outcome for a treatment group to the change over time for a control group. The key assumption is that in the absence of treatment, the average outcomes for the treated and control groups would follow parallel trends over time. 
+
+DID has been applied extensively in economics and policy evaluation research. While a simple and intuitive technique, it relies on several strong assumptions, including no spillover effects between treatment and control groups, and balance between groups such that the parallel trends assumption holds [@NBERw22791]. Violations of these assumptions can lead to biased effect estimates. Existing generalized forms help relax assumptions, but require more complex modeling and data to credibly identify effects [@Xu2016GeneralizedSC].
+
+### Synthetic Control Method {.unnumbered}
+
+The synthetic control method, introduced by @abadie2003, is a comparative case study technique for causal inference with aggregate panel data. It constructs a synthetic control unit as a weighted average of control units that best approximates the pretreatment characteristics of the treated unit. The effect is estimated by comparing the posttreatment outcomes of the treated unit to its synthetic control [@abadieetal2010]. 
+
+Compared to DID, SCM makes weaker assumptions and can yield improved effect estimation when there are no adequate existing control units or when the parallel trends assumption is violated. However, it still assumes no spillovers or anticipatory effects. The transparency of the technique has contributed to its rising popularity across the social sciences [@NBERw22791]. 
+
+A key limitation is that the SCM does not naturally quantify uncertainty, hampering statistical inference. Extensions using placebo tests have been proposed to assess significance, but can suffer from multiple testing problems. Bayesian implementations are an active area of methodological research aimed at producing well-calibrated measures of uncertainty with the SCM [@Kim2020BayesianSC].
+
+### Bayesian Structural Time Series {.unnumbered}
+
+Bayesian structural time series models are a flexible approach for time series modeling and forecasting. They decompose a time series into interpretable components like trends, seasonality, and regression effects using latent state variables within a Bayesian state space modeling framework [@Brodersen2015]. 
+
+For causal inference, BSTS is proposed as an alternative to SCM that naturally quantifies uncertainty and accounts for anticipation effects using the regression component [@giudice2022inference]. It does not require pre-specification of control units. However, it relies on modeling assumptions and places priors on components that can influence results. BSTS also cannot incorporate time-varying treatments. Extensions to the multivariate case have been developed, but can increase complexity [@mbsts].
+
+### Gaussian Process Regression {.unnumbered}
+
+Gaussian process regression is a nonparametric Bayesian approach that specifies a prior directly over the space of functions describing the data, making it "a very attractive model in many application domains" [@GPML]. This makes for a flexible model that lets the data speak for themselves without imposing restrictive assumptions upfront, making it "arguably the best default alternative for analyzing [time-series cross-sectional] data." [@carlson2018GPR].
+
+For panel data analysis and causal inference, GPR avoids limitations of SCM and BSTS. It can flexibly model trends and capture spillovers between units while quantifying uncertainty. It also does not require pre-specifying control units or components. These advantages have motivated applications of GPR for causal inference, though it is not yet as widely adopted as alternatives [e.g., @carlson2020GPP]. Challenges include computational scaling and choices involved in specifying the GP prior and likelihood. Extensions to multi-output GPs and deep GPs are promising avenues for future research [@calguncontrolwithGPs].
+
+
+{{< pagebreak >}}
+
+# Methods {#sec-methods}
+
+## Data
+
+The electricity generation data used in this analysis is sourced from the European Network of Transmission System Operators (ENTSO-E) Transparency Platform. This platform provides hourly data on electricity demand, supply, transmission, and generation reported by participating transmission system operators across Europe.
+
+The raw data extracted from ENTSO-E covers the hourly domestic electricity generation from January 2015 to December 2022 for the 27 member countries of the European Union along with Serbia, Bosnia and Herzegovina, and the United Kingdom. Only generation from fossil fuel sources ("Fossil Gas," "Fossil Hard coal," "Fossil Oil," "Fossil Brown coal/Lignite," "Fossil Coal-derived gas," "Fossil Oil shale," and "Fossil Peat") is retained while renewables and nuclear are omitted.
+
+The data is aggregated to monthly resolution due to the noisiness of hourly fluctuations. Some light preprocessing is applied, including identifying relevant generation sources as "fossil fuel" and filtering out countries with substantial missing observations.
+
+Temperature data is sourced from OpenWeatherMap as an important covariate. Maximum and minimum temperatures are queried for every day between January 1st, 2015 and December 31st, 2022 for the weather station nearest the capital city of each country. The average of the maximum and minimum temperatures is used as the temperature value for each day. Average temperatures are then aggregated to the month level and incorporated into the main dataset based on the country and month corresponding to each electricity generation observation.
+
+Dummy variables are constructed indicating the treatment group (Germany) and treatment period (post-nuclear closure).
+
+The final time-series cross-sectional dataset is a panel of 22 countries over 103 months, resulting in 2266 total observations. Each observation includes the date (month), country name, total domestic fossil fuel electricity generation in MWh, and temperature.
+
+A key limitation is that the ENTSO-E data only covers domestic generation within each country. It does not account for electricity imports and exports across borders (although the two outcomes are certainly related). This precludes examining potential spillover effects of Germany's nuclear phase-out on its neighboring countries.
+
+## Notation
+
+This section outlines the notation employed throughout the dissertation, offering a structured and consistent approach to representing various elements of the study. The chosen notation draws inspiration from @NBERw22791 and @giudice2022inference.
+
+Consider units represented by $i$ with $i \in 1, \dots, m$, observed over time periods $t$, with $t \in 1, \dots, T$. The variable of interest is the quantity of electricity generated (measured in `r UNIT_OF_INTEREST`), represented as $y_{i,t}$. Using the ENTSO-E panel, there are $m$ country units and $T$ week periods. Specifically, Germany, a key focus of this study, is denoted by $i=1$.
+
+The treatment assignment indicator $w_{i,t}$ defines each observation $y_{i,t}$ with $w_{i,t}\in \{0,1\}$. The value '1' indicates treatment (e.g., Germany during the treatment period) and '0'  represents controls (e.g. Germany outside the treatment period and all other countries at all times). 
+
+The closure of nuclear power plants in Germany on December 31st, 2021, serves as the primary treatment event. Therefore, $T_0$ represents the last period before this event, and $T_0+1$ the period including this date. Germany received treatment during $t = T_0 + 1$ to $t=T$.
+
+
+The primary focus is on treatment effects for Germany during its treatment period, $t = T_0 + 1$ to $T$. The relationship between treatment $w_{i,t}$ and the realized outcome $y^{obs}_{i,t}$ can be illustrated as follows:
+
+$$
+y^{obs}_{i,t} = 
+    \begin{cases}
+        y_{i,t}(0) & \text{if } w_{i,t} = 0, \\
+        y_{i,t}(1) & \text{if } w_{i,t} = 1.
+    \end{cases}
+$$
+
+Note that some $y^{obs}_{i,t}$ values, especially for Germany post $t_0$, are missing since electricity from fossil fuels is observed once post-treatment.
+
+The difference between two potential outcomes, $y_{i,t}(1)$ and $y_{i,t}(0)$, provides the causal effects at both the subject and time levels.
+
+For this study, there is a single country- and time-varying predictor observed at each time period denoted with $x_{i,t}$. This predictor is used to control for the effects of exogenous variables on the outcome of interest.
+
+Combining several of the above terms for convenience in applying some of the methods described below, I let $\textbf{y} = \{y_{1,1},\dots,y_{1,T}\} \in \mathbb{R}^T$ be the time series of the treated country (Germany). Then $X = \{x_{i,1},\dots, x_{i,T}\}' \in \mathbb{R}^T$ be the vector of the associated covariate. Then with $\textbf{z}_1'$ as the vector containing $\{y_{2,1},\dots,y_{m,1}\}$, the variable of interest observed for all control units at $t=1$, I can define $Z = \{\textbf{z}'_{1},\dots, \textbf{z}'_{T}\}' \in \mathbb{R}^{T\times m-1}$ the matrix containing the time series of the relevant units for the synthetic control (other European countries). Then $X^{*} = \{X',Z'\}'$ is the combined matrix of the single covariate and all control units—each with sample size $T$.
+
+## Implementation
+
+### Differences-in-Differences 
+
+The Differences-in-Differences approach is a widely-used econometric technique designed to infer causal effects by leveraging temporal and cross-sectional variations in treatment exposure. Given the panel structure of my dataset, where countries are observed over time and treatment is applied starting at a specific time, DiD serves as a valuable baseline.
+
+#### Model Specification
+
+The treatment of interest is the closure of nuclear power plants in Germany starting from $t = T_0 + 1$. For each country $i$ and time $t$, the outcome $y^{obs}_{i,t}$ is said to vary based on its treatment assignment. To capture the causal effect of the treatment, the DiD method contrasts the change in outcomes of Germany (from pre-treatment to post-treatment) against the analogous change in outcomes of control countries. 
+
+To capture the causal effect of the treatment, the DiD method contrasts the change in outcomes of Germany (from pre-treatment to post-treatment) against the analogous change in outcomes of control countries. 
+
+To account for potential confounding factors, my model incorporates exogenous predictors, denoted by $x_{i,t}$, to control for their effects. The DiD model can be represented as:
+
+$$
+\begin{aligned}
+y_{i,t} = & \alpha + \beta_1 \text{treatment\_period}_t + \beta_2 \text{treatment\_group}_i + \\&\delta \text{treatment\_period}_t \times \text{treatment\_group}_i + 
+\\&\sum_{k=1}^{m} \gamma_k \times I(i=k) + \theta x_{i,t} + \sum_{k=1}^{m} \lambda_k \times x_{i,t} \times I(i=k) + \epsilon_{i,t}
+\end{aligned}
+$$
+
+In this equation:
+
+- $y_{i,t}$ is the quantity of electricity generated for country $i$ at time $t$.
+- $\alpha$ is the intercept term.
+- $\beta_1$ captures the effect of the post-treatment period, with $\text{treatment\_period}_t$ indicating whether the observation is from the post-treatment period.
+- $\beta_2$ captures the effect of being in the treatment group (Germany), with $\text{treatment\_group}_i$ indicating whether the observation is from Germany.
+- $\delta$ captures the DiD estimator of the treatment effect, with $\text{treatment\_period}_t \times \text{treatment\_group}_i$ representing the interaction between the treatment period and the treatment group.
+- $\sum_{k=1}^{m} \gamma_k \times I(i=k)$ represents the country fixed effects, where $I(i=k)$ is an indicator function that equals 1 if country $i$ is the $k$-th country and 0 otherwise.
+- $\theta x_{i,t}$ represents the controlled impact of the exogenous predictor on electricity generation for country $i$ at time $t$
+- $\sum_{k=1}^{m} \lambda_k \times x_{i,t} \times I(i=k)$ accounts for the controlled impacts of the exogenous predictor, temperature, interacted with country fixed effects. As above, $I(i=k)$ is an indicator function that equals 1 if country $i$ is the $k$-th country and 0 otherwise, and $\lambda_k$ is the coefficient for the interaction between temperature and the $k$-th country.
+- $\epsilon_{i,t}$ is the error term.
+
+An essential characteristic of the DiD method is the "parallel trends assumption." This presumes that, in the absence of treatment, the treated and untreated units would have shown parallel trends in outcomes. The strength of the DiD method lies in its simplicity and its ability to control for time-invariant unobserved heterogeneities. However, it's essential to be aware of its limitations. The method's reliance on the parallel trends assumption can be a significant source of bias if this assumption is violated. Additionally, any post-treatment events or shocks that differentially affect the treated and control groups can introduce bias. Lastly, the DiD approach assumes that the treatment effect is consistent across time, which might not hold in all contexts.
+
+To estimate the causal effect of the nuclear plant closures on electricity generation, I employ a two-step strategy:
+
+1. Pre-treatment matching: Before applying the DiD method, I match Germany with potential control countries based on pre-treatment characteristics and trends. This ensures that my treated and control units are as similar as possible before the treatment. Specifically, I normalize the outcome variable (electricity generation) within each country to lie between 0 and 1. I then compute the difference in trends between Germany and each potential control country during the pre-treatment period. Countries with statistically insignificant differences in trends, as determined by linear regression, are selected as controls.
+
+2. DiD estimation: After matching, I apply the DiD method to the matched dataset according to the model given above. 
+
+#### Checks
+
+As described, there are a number of potential pitfalls in applying the DiD method. To address these, I address several standard robustness checks.
+
+As the parallel trends assumption is crucial for the validity of DiD estimates, I check for violations by graphically inspecting the pre-treatment trends of the outcome variable for Germany and potential control countries. This visualization, combined with the statistical tests mentioned earlier, helps ensure that the parallel trends assumption holds.
+
+If other countries in my control group were indirectly affected by Germany's nuclear plant closures, my estimates could be biased in what is known as a "spill-over effect." To address this, I could conduct sensitivity analyses excluding countries that might have experienced significant indirect effects. However, I determine this concern to be less relevant in this context since the treatment is reasonably modest in scale and the necessary logical path from plant closures in Germany to electricity generation in its neighbors is sufficiently indirect.
+
+While DiD inherently controls for time-invariant unobserved factors, it might be biased in the presence of unobserved factors that change over time and are correlated with the treatment. Unfortunately, as this dataset overlaps with the 2022 Russian war in Ukraine, this is a potential concern. To the extent that the war has a differential impact on the treated and control groups, these estimates may be biased accordingly.
+
+#### Methodological Fit
+
+There are a number of well-documented advantages and disadvantages to the DiD method. Foremost among its advantages is simplicity: the straightforwardness of DiD allows for easy interpretation and communication of results. The approach is well-understood and used broadly across disciplines. Additionally, by comparing within and between groups over time, it inherently accounts for any unobserved factors that remain constant over time. However, the DiD method is not without its weaknesses. The reliance on the parallel trends assumption is a potential pitfall; if pre-treatment trends are not similar, my DiD estimates can be biased. Post-treatment events that disproportionately affect the treated and control groups are another source of potential bias. The approach additionally assumes a consistent treatment effect across time, which might not be the case in certain scenarios. In the next section, I describe an alternative approach to causal inference that addresses some of these concerns.
+
+### Synthetic Control Method
+
+An alternative approach that can relax the parallel trends assumption is the synthetic control method. This method constructs a synthetic control unit as a weighted average of the control units, where the weights are chosen to make the synthetic control unit as similar as possible to the treatment unit in terms of the pre-treatment trend and other observed characteristics. Given the unique treatment event in Germany—the closure of nuclear power plants in 2021—the traditional SCM approach provides a compelling framework to estimate the causal effect by comparing the post-treatment outcomes of Germany to those of the synthetic control.
+
+#### Model Specification
+
+The synthetic control is constructed using a combination of control countries, where the weights assigned to each control country are determined by their pre-treatment characteristics and outcomes. Specifically, let $W = (w_2, w_3, ..., w_m)$ be a vector of weights assigned to each control country, where $w_i$ represents the weight of the $i^{th}$ control country in constructing the synthetic control. The goal is to find a set of weights such that the pre-treatment outcomes and characteristics of the synthetic control closely match those of Germany. Before constructing the synthetic control, the outcome variable and other relevant variables are scaled to lie between 0 and 1. This normalization ensures consistent weight determination across different scales of variables.
+
+
+Mathematically, the synthetic control for Germany at time $t$ can be represented as:
+
+$$
+y^{syn}_{t} = \sum_{i=2}^{m} w_i y_{i,t} 
+$$
+
+where $y^{syn}_{t}$ is the outcome of the synthetic control at time $t$, and $y_{i,t}$ is the outcome of the $i^{th}$ control country at time $t$.
+
+To determine the weights $W$, I employ a weighted least squares optimization approach. The objective is to minimize the root mean squared error (RMSE) between the observed outcomes of Germany and those of the synthetic control. The weights are constrained such that they sum up to 1 and each weight lies between 0 and 1. This constrained optimization problem is applied using the following function defined in R:
+
+```{r}
+#| eval: false
+synthetic_control <- function(X, y) {
+  # ...
+  res <- nloptr::slsqp(
+    x0 = start,
+    fn = loss,
+    gr = loss_gradient,
+    heq = constraints,
+    heqjac = constraints_jacobian,
+    lower = lower,
+    upper = upper
+  )
+  coef_ <- res$par
+  mse <- loss(coef_)
+  # ...
+}
+```
+
+The distance metric used in the optimization is a weighted distance, allowing different pre-treatment characteristics to be given varying importance when determining the weights. This ensures that more crucial characteristics have a higher influence on the synthetic control construction.
+
+For the SCM to provide unbiased estimates, it's crucial that the pre-treatment outcomes and characteristics used in constructing the synthetic control are not affected by the treatment. It's also essential that the chosen control countries did not experience any significant shocks or interventions during the study period that might confound the estimates.
+
+#### Model Validation
+
+I provide a graphical validation by plotting the residuals, which are the differences between observed outcomes and synthetic control outcomes, over time. This is done both for individual time points and cumulatively. A good match is identified by a residual plot which shows random fluctuations around zero prior to the treatment and a stable post-treatment trend. Additionally, quantitative measures such as the mean squared error (MSE), mean absolute error (MAE), and RMSE between Germany and its synthetic control during the pre-treatment period are used to assess the fit, with a lower MSE indicating a closer match.
+
+To further assess the significance of the estimated treatment effects, placebo tests are conducted. By iteratively treating each control country as if it were treated, constructing a synthetic control for it, and then estimating the post-treatment effect, the distribution of these placebo effects provides a reference to judge the magnitude and significance of the actual treatment effect observed for Germany.
+
+#### Estimation
+
+With the synthetic control validated, the next step is to estimate the causal effect of the nuclear plant closures on electricity generation in Germany. The causal effect at each time point is calculated as the difference between the observed outcome for Germany and the outcome of the synthetic control.
+
+$$
+\delta_t = y_{1,t} - y^{syn}_{t} 
+$$
+
+To understand the overall impact of the nuclear plant closures on electricity generation in Germany for the entire year of 2022, the cumulative treatment effect is computed.
+
+$$
+\delta = \sum_{t=T_0+1}^{T} (y_{1,t} - y^{syn}_{t}) 
+$$
+
+This provides a comprehensive estimate of the total impact of the nuclear plant closures on electricity generation in Germany.
+
+#### Methodological Fit
+
+An important potential model violation for SCM is the assumed absence of spillover effects. If the treatment in Germany affected the outcomes in control countries, it could violate the assumptions of the SCM. For instance, if the closure of nuclear plants in Germany led to significant changes in electricity prices or policies in neighboring countries, the synthetic control might not provide an accurate counterfactual. 
+
+Another assumption is the factor model, which posits that the observed outcomes are linear combinations of observed and unobserved factors. If this assumption doesn't hold, the synthetic control might not be an accurate representation. Furthermore, the method assumes that, apart from the treatment, no other events or shocks differentially affect the treated unit and the synthetic control in the post-treatment period. Any such events can introduce bias into the estimated treatment effects.
+
+The SCM's ability to incorporate multiple control units to create a synthetic counterpart can lead to improved pre-treatment fit, enhancing the credibility of the counterfactual. Additionally, the method's graphical results are intuitive and easy to interpret.
+
+### Bayesian Structural Time Series
+
+As described above, the SCM implementation has a number of constraints, including that the weights applied to control units sum to 1 [@NBERw22791]. This can pose problems when the unit of interest is an outlier relative to the control units for the variable of interest. This is the case in my case as Germany generates much more electricity from fossil fuel sources than any of the control countries. One way to improve on this method is to use a spike-and-slab prior distribution, as in @Brodersen2015. 
+
+I implement a synthesis of the SCM and Brodersen's implementation of a Bayesian structural time series model for flexible yet robust causal inference.
+
+#### Model Specification
+
+The BSTS model captures the trend, seasonality, and influence of covariates on the time series using a state-space framework. The observation equation links the observed electricity generation $y_t$ to the trend component $\mu_t$, seasonal component $\gamma_t$, covariates $x_t$, and error term $\epsilon_t$. The state equation governs how the latent state variables like trend and seasonality evolve over time.
+
+The BSTS model, as implemented in the `CausalImpact` package, is designed to infer the causal impact of an intervention by predicting the counterfactual market response in a synthetic control. It does so by leveraging a state-space model that incorporates various structural components, such as trends, seasonality, and regression effects. 
+
+In the context of this study, the BSTS model captures the underlying trend in electricity generation in Germany, periodic fluctuations due to seasonality, and the influence of external covariates. The model can be represented as:
+
+$$
+y_t = \mu_t + \gamma_t + \beta x_t + \epsilon_t
+$$
+
+Where:
+
+- $y_t$ is the observed electricity generation in Germany at time $t$.
+- $\mu_t$ represents the trend component.
+- $\gamma_t$ represents the seasonal component.
+- $x_t$ is a vector of external covariates at time $t$, and $\beta$ is the corresponding vector of coefficients.
+- $\epsilon_t$ is the error term, typically assumed to follow a normal distribution.
+
+This formulation allows the BSTS model to capture the complex dynamics of time series data, making it particularly suited for estimating the causal impact of interventions in observational studies.
+
+In Bayesian analysis, priors play a crucial role in incorporating external information or beliefs about the parameters. For the BSTS model, the choice of priors can be particularly important to ensure that the model is both flexible and interpretable. In the context of this study, I employ a spike-and-slab prior distribution, as suggested by @Brodersen2015. This type of prior is a mixture of two distributions: a point mass at zero (the "spike") and a continuous distribution (the "slab"). The spike-and-slab prior effectively introduces sparsity into the model, ensuring that only relevant predictors are included in the final model. This is especially useful when dealing with multiple potential control units, as it helps in selecting the most influential controls for constructing the synthetic control. This prevents overfitting by allowing only relevant covariates to influence the synthetic control. The spike concentrates probability mass at zero, while the slab is a diffuse normal distribution. 
+
+#### Estimation
+
+The BSTS model, as implemented in the `CausalImpact` package, allows for a comprehensive specification that captures the underlying dynamics of the time series data. The model is formulated in a state-space representation, which decomposes the time series into various structural components. 
+
+Given the observed data up to time $t$, the BSTS model predicts the counterfactual outcome for time $t+1$. This prediction is based on the underlying trend, seasonality, and the influence of external covariates. The difference between the observed and counterfactual outcomes provides an estimate of the causal effect of the intervention.
+
+To estimate the causal effect using BSTS, I employ a Markov chain Monte Carlo (MCMC) algorithm. This Bayesian approach provides a full posterior distribution for each parameter, allowing for a comprehensive understanding of the uncertainty associated with the estimates. The MCMC samples from the posterior distribution of the model parameters, given the observed data, and constructs a synthetic control that represents the counterfactual scenario without the intervention.
+
+#### Validation
+
+Validating the fit of the BSTS model is crucial to ensure that the causal estimates are reliable. One approach to validation is to inspect the in-sample fit of the model. By comparing the model's predictions to the observed data during the pre-intervention period, I can assess how well the model captures the underlying dynamics of the time series.
+
+Another essential aspect of model validation is the assessment of the model's residuals. Ideally, the residuals should be white noise, indicating that the model has adequately captured all the information in the data. Tools like autocorrelation and partial autocorrelation plots can provide insights into the nature of the residuals and indicate whether there's remaining structure that the model hasn't captured.
+
+#### Methodological Fit
+
+One of the primary concerns with BSTS is overfitting. Given its flexibility, the BSTS model can fit the training data very closely, potentially capturing noise rather than the underlying signal. This can lead to overly optimistic in-sample predictions but poor out-of-sample performance. Additionally, the assumption that the residuals are white noise is crucial for the validity of the causal estimates. If there's remaining structure in the residuals, it indicates that the model hasn't captured all the relevant information, potentially leading to biased estimates.
+
+In contrast with the DiD and SCM approaches, BSTS provides a flexible framework that can capture the underlying dynamics of the time series data, including trends, seasonality, and the influence of external covariates. This means that the counterfactual predictions are based on a more comprehensive representation of the information available for analysis. The BSTS approach better accommodates trend, seasonality, and outliers through its state-space framework. Automatic variable selection avoids having to specify covariates a priori. The Bayesian approach also provides more comprehensive uncertainty quantification via posterior samples.
+
+### Gaussian Process Regression
+
+#### Model Specification
+
+I model the electricity generation $y_{i,t}$ for country $i$ at time $t$ using a Gaussian process regression model:
+
+$$y_{i,t} = f(X_{i,t}) + \epsilon_{i,t}, \quad \epsilon_{i,t} \sim \mathcal{N}(0, \sigma^2)$$
+
+where $f(\cdot)$ represents an unknown function and $\epsilon_{i,t}$ is Gaussian noise. I place a Gaussian process (GP) prior on the function $f(\cdot)$:
+
+$$f(\cdot) \sim \mathcal{GP}\left(0, k(X,X')\right)$$ 
+
+The covariance function $k(X,X')$ is defined as:
+
+$$k(X,X') = k_{exp}(X,X') + k_{white}(X,X')$$
+
+where $k_{exp}(X,X')$ is the exponential kernel:
+$$
+k_{exp}(X,X') = \sigma^2_{f} \exp\left(-\frac{1}{2\Lambda^{-2}} (X-X')^T(X-X')\right)
+$$
+
+and $k_{white}(X,X')$ is the white noise kernel. The exponential kernel captures smooth trends while the white noise kernel accounts for noise in the data.
+
+Using the `GPy` python package, I optimize the kernel hyperparameters using only the pre-treatment data to learn the underlying patterns without being influenced by the post-treatment outcomes. A key innovation is using automatic relevance determination (ARD) for input selection as documented in @neal1996bayesian. Here, $\Lambda = \text{diag}(\ell_2, \ldots, \ell_m)$ is a diagonal matrix containing the characteristic lengthscale parameter $\ell_i$ for each input $i$:  
+$$
+\ell_i = \frac{1}{\text{FI}_i}
+$$
+
+Where FI$_i$ is the feature importance of input $i$. Shorter lengthscales imply greater influence on the GP. I use this to remove unnecessary inputs, avoiding overfitting.
+
+#### Estimation
+
+Once we've identified the relevant features using ARD, the next step involves training the Gaussian Process Regression model. This training process is crucial for ensuring that my model captures the underlying patterns in the data and can make accurate counterfactual predictions.
+
+I find that the White kernel defined above is necessary in this context in order to avoid overfitting. This is likely due to the fact that the data is relatively sparse, with only a relatively small number of observations for each country. The White kernel allows the model to represent the noise in the data, which is especially important given the small sample size.
+
+I begin by fitting the GP model to the pre-treatment data. After the initial fit, I employ time series cross-validation to fine-tune the model's hyperparameters—most importantly, bounds imposed on the lengthscale and noise parameters. This step is essential for two reasons: by holding out portions of my data and testing the model's predictions against these holdouts, I can assess how well my model is likely to perform on unseen data. Second, I'm able to test a large number of hyperparameter combinations to find the best model performance without overfitting to the training data. This is especially important given the relatively small sample size in this study. After selecting hyperparameter values, I do a preliminary evaluatation of model performance by fitting a model using the first 80% of the pre-treatment data and testing the model's predictions on the remaining 20%. This provides a sense of how well the model generalizes to unseen data without exposing it to the post-treatment outcomes, which I don't necessarily expect the model to capture.
+
+Once I'm ready to fit the final model, I train on the pre-treatment period. With the model trained and the relevant controls identified, I proceed to the crux of my analysis: estimating the causal effect of the nuclear plant closures. I achieve this by making counterfactual predictions for the post-treatment period.
+
+Using the optimized hyperparameters, $\theta^*$, I draw samples from the GP posterior predictive distribution to make predictions on the post-treatment data, making predictions about the counterfactual electricity generation for Germany, $y_{1,t>t_0}(0)$:
+
+$$
+p(\tilde{y}_{1,t>t_0} | X, y, \theta^*) = \int p(\tilde{y}_{1,t>t_0} | f, X, \theta^*) p(f|X,y,\theta^*) df
+$$
+
+The estimated treatment effect is then derived by comparing these counterfactual predictions, $\tilde{y}_{1,t>t_0}(0)$, to the observed post-treatment outcomes, $y_{1,t>t_0}(1)$. This comparison provides a quantification of the causal impact of the nuclear plant closures on electricity generation. The Bayesian approach provides uncertainty estimates on these predictions.
+
+Overall, GPR offers a flexible framework by placing a probability distribution over functions without strong assumptions. The ARD technique enables data-driven input selection to prevent overfitting. And the Bayesian nature quantifies uncertainty in a principled way. This makes GPR well-suited for estimating treatment effects in this analysis.
+
+{{< pagebreak >}}
+
+# Results {#sec-results}
+
+My analysis begins with a simple exploration of the raw data.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+mwh_to_twh <- 1e-6
+
+germany_annual_ffg_twh <-
+  ffg %>% 
+      mutate(dt = as_date(t), y = year(dt)) %>%
+      group_by(y, country) %>% 
+      summarise(sum = round(sum(yit)*mwh_to_twh,2)) %>%
+      ungroup() %>%
+      mutate(country = fct_reorder(str_to_title(str_replace_all(country,"_"," ")), sum, .desc = TRUE)) |> 
+      filter(country == "Germany")
+
+germany_annual_twh <- g |> 
+  mutate(dt = as_date(t), y = year(dt)) |> 
+  group_by(y, country) |> 
+  summarise(sum = round(sum(yit)*mwh_to_twh,2)) |> 
+  ungroup() |>
+  mutate(country = fct_reorder(str_to_title(str_replace_all(country,"_"," ")), sum, .desc = TRUE)) |> 
+  filter(country == "Germany")
+
+ffg %>% 
+  mutate(dt = as_date(t), y = year(dt)) %>%
+  group_by(y, country) %>% 
+  summarise(mean = round(mean(yit)*mwh_to_twh,2)) %>%
+  ungroup() %>%
+  mutate(country = fct_reorder(str_to_title(str_replace_all(country,"_"," ")), mean, .desc = TRUE)) %>%
+  rename(Year = y, Country = country) %>%
+  group_by(Country) %>%
+  filter(n() == 8) %>%
+  ungroup() %>%
+  pivot_wider(names_from = Year, values_from = mean) %>%
+  knitr::kable(caption = "Average monthly electricity generation from fossil fuels (TWh) by country", booktabs = TRUE) %>%
+  kableExtra::kable_styling(latex_options = c("striped", "hold_position"), font_size = 8)
+```
+
+Germany, central to my research question, displayed only a marginal increase in fossil fuel electricity generation post the closure of its last nuclear plants in December 2021, moving from 15.11 TWh in 2021 to 15.20 TWh in 2022. Given the size of the pandemic-related slowdown and the sizable amount of nuclear energy that was phased out, this minute increment suggests early on that Germany either turned to alternative energy sources, potentially renewables, or made significant gains in energy efficiency. Strikingly, the 2022 figure remains well below every pre-pandemic year for which I have ENTSO-E data. In contrast, France experienced a conspicuous surge in fossil fuel electricity generation, ascending from 2.82 TWh in 2021 to 3.44 TWh in 2022, indicating a shift that may have been influenced by external factors or domestic policy changes. Another nation that stands out is Bulgaria, which underwent a marked jump in its fossil fuel generation from 1.58 TWh in 2021 to 1.88 TWh in 2022, illustrating the potential for changes in energy policies or an upswing in industrial demands. Looking at the table as a whole, it's also noteworthy that Germany is a signficant outlier for fossil fuel electricity generation, with the next highest country, Poland, generating only 60% of Germany's 2022 figure.
+
+Proceeding in order of complexity, I proceed to estimate the causal effect of the nuclear plant closures using the DiD, SCM, BSTS, and GPR models.
+
+### Difference-in-Differences {.unnumbered}
+
+To evaluate the parallel trends assumption, I normalize the outcome variable by country and plot the difference between each potential control unit and my treatment unit. The resulting plot shows the difference between each country's electricity generation and Germany's electricity generation in the pre-treatment period. The parallel trends assumption holds if the differences are relatively stable over time.
+
+![Normalized pre-treatment differences between each potential control unit and Germany](../plots/2023-08-23-chart_parallel_trends.png){#fig-did-normalized}
+
+For each country, I fit a linear model for the pre-treatment differences using the time variable as the predictor. I use the resulting coefficients as a measure of a potential control unit's compatibility with the DiD model assumptions. I remove countries with a non-zero slope at the 5% significance level, leaving `r lares::vector2text(did_control_countries, and = "and")` in the final donor pool. The parallel trends assumption is thus determined to hold for these countries, and they are therefore suitable for use as potential controls.
+
+Next, I fit the DiD model and show the resulting model coefficients in @tbl-did_coefs.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: tbl-did_coefs
+#| tbl-cap: "DiD model coefficients"
+did_model_results |> 
+  mutate(term = str_replace_all(term, "treatment_group", "Treatment Group"),
+         term = str_replace_all(term, "treatment_period", "Treatment Period"),
+         term = str_replace_all(term, "x_", ""),
+         term = str_replace_all(term, ":", " x "),
+         term = if_else(str_sub(term, 1, 1) == "i", str_sub(term, 2), term),
+         term = str_replace_all(term, "_", " "),
+         term = str_to_title(term),
+         term = str_replace_all(term, "Temp", "Temperature"),
+         term = str_replace_all(term, " X ", " x ")) |> 
+  mutate(estimate = round(estimate, 2),
+         std.error = round(std.error, 2),
+         statistic = round(statistic, 2),
+         p.value = round(p.value, 3)) |> 
+  transmute(term = as.factor(term), estimate, std.error, statistic, p.value) |> 
+  mutate(term = fct_reorder(term, abs(statistic), .desc = TRUE)) |> 
+  mutate(term = fct_relevel(term, c("(Intercept)", "Treatment Period x Treatment Group", "Treatment Period", "Treatment Group"))) |>
+  arrange(term) |>
+  drop_na() |>
+  knitr::kable(booktabs = TRUE) |>
+  kableExtra::kable_styling(latex_options = c("striped", "hold_position"), font_size = 8)
+```
+
+I show for the DiD estimator of the treatment effect an estimate of `r (did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate)/ 1e6) |> round(2)` (p-value = `r (did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(p.value)) |> round(3)`) with a 95% confidence interval of (`r ((did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate) - 1.96 * did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(std.error))/ 1e6) |> round(2)`, `r ((did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate) + 1.96 * did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(std.error))/ 1e6) |> round(2)`). Extrapolated over a year (noting that the true effect is likely not actually constant over time), this would imply that on average, the nuclear plant closures led to a `r (abs(did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate))*12/1e6) |> round(2)` TWh  decrease in annual fossil fuel electricity generation in Germany. This seems at first glance a modest-sized effect—equal to `r round((abs(did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate))*12/1e6) / (germany_annual_ffg_twh |> filter(y == 2022) |> pull(sum)),4)*100`% of the country's total electricity generation from fossil fuels in 2022 and `r round((abs(did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate))*12/1e6) / (germany_annual_twh |> filter(y == 2022) |> pull(sum)),4)*100`% of the country's total electricity generation from all sources in the same year.
+
+However, the 95% confidence interval is also quite wide and includes zero. This suggests that the DiD estimator is not very precise and that the true treatment effect could be much larger or smaller than the point estimate. Surprisingly though, since the upper bound of the intervals is only just above zero, the results lend weak evidence to there having been not been an increase in fossil fuel electrcity generation following the plant closures. The model doesn't appear to be a poor fit—the adjusted R-squared value is 0.959, meaning the temperature control and country fixed effects capture a large amount of the variability in the outcome variable. However, on inspection of a plot of the fitted values, it's apparent that the model fit varies considerably by country. The model's residuals show some structure, indicating that the model may not be capturing all the relevant information in the data. This is to be expected, given the model's simplicity and the complexity of the underlying dynamics.
+
+I additionally show the DiD predicted and observed values in @fig-did with the start of the treatment effect (the date of the 2021 nuclear plant closures) denoted with a dotted line.
+
+![Predicted values from DiD model](../plots/2023-08-23-chart_did_monthly.png){#fig-did}
+
+Finally, I perform a sensitivity analysis to assess the robustness of the DiD model by removing one country at a time from the donor pool and refitting the model. I then compare the resulting treatment effect estimates to the original estimate. I find these hold-one-out estimates to be quite stable, all falling within around 10% of the original estimate. This means that the DiD model is relatively insensitive to the particular composition of the donor pool, which is a positive sign for the model's robustness. 
+
+### Synthetic Control Method {.unnumbered}
+
+The synthetic control method provides an alternative approach to estimating the treatment effect. I construct a synthetic Germany as a weighted average of other European countries that matches the pre-treatment electricity generation trends. 
+
+The optimization routine produces weights for each control candidate country and the subset of temperature measurements that correspond to Germany. The results are shown in @tbl-scm_weights.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: tbl-scm_weights
+#| tbl-cap: "Weights for each control candidate country obtained from SCM optimization routine"
+
+scm_effect <- read_csv(paste0(getwd(), "/..", "/data/clean/scm_effect.csv"))
+
+scm_cumulative_effect_twh <- scm_effect |>
+  filter(metric == "Estimated cumulative effect") |>
+  pull(twh) |> round(2)
+
+scm_average_effect_twh <- scm_effect |>
+  filter(metric == "Estimated average effect") |>
+  pull(twh) |> round(2)
+
+placebo_test_p_value <- scm_effect |>
+  filter(metric == "p-value") |>
+  pull(value) |> round(2)
+
+scm_weights <- read_csv(paste0(getwd(), "/..", "/data/clean/scm_weights.csv")) |>
+  rename(Country = par, Weight = coef) |>
+  mutate(Weight = round(Weight, 3))
+scm_weights |>
+  knitr::kable(booktabs = TRUE) |>
+  kableExtra::kable_styling(latex_options = c("striped", "hold_position"), font_size = 8)
+```
+
+I find satisfyingly intuitive results from the optimization routine. The countries with the highest weights are geographically proximate to Germany—a characteristic I would expect from countries which share similar generation trends, as climate is one of the most important factors in determining electricity demand. The optimization routine places the highest weight on `r scm_weights |> arrange(desc(Weight)) |> head(1) |> pull(Country)` at `r scm_weights |> arrange(desc(Weight)) |> head(1) |> pull(Weight) |> round(2)`, with the next highest weight going to `r scm_weights |> arrange(desc(Weight)) |> slice(2) |> pull(Country)` at `r scm_weights |> arrange(desc(Weight)) |> slice(2) |> pull(Weight) |> round(2)`. The weights for most of the remaining countries are pushed nearly to zero.
+
+As shown in @fig-scm_pred, the model shows a reasonable fit to the German generation trend over the pre-treatment period.
+
+![Predicted values from SCM model](../plots/2023-08-23-chart_scm_predicted_monthly.png){#fig-scm_pred}
+
+In the post-treatment period, I observe a somewhat different result than found using DiD. As shown in @fig-scm_residuals and @fig-scm_cumulative, the trajectories of observed and synthetic Germany diverge, with observed Germany showing a modest increase relative to the synthetic counterfactual. 
+
+![Treatment effect estimated using SCM model](../plots/2023-08-23-chart_scm_residuals_monthly.png){#fig-scm_residuals}
+
+![Cumulative treatment effect estimated using SCM model](../plots/2023-08-23-chart_scm_residuals_cum_monthly.png){#fig-scm_cumulative}
+
+The estimated causal effect accumulates to `r scm_cumulative_effect_twh` TWh in total over the 12 post-treatment months. This implies the nuclear phase-out increased fossil fuel generation in Germany by `r scm_average_effect_twh` TWh on average per month in 2022. The estimated effect appears constant over time. This seems likely to be a model artifact, as a large majority of residuals from the treatment period are positive.
+
+Placebo tests were performed by randomly assigning the treatment to each of the other countries in the donor pool and refitting the model. These tests using other countries show the post-treatment RMSE for Germany is not unusually high, yielding a p-value of `r placebo_test_p_value`. Despite the sign change from the previous approach, this lends additional evidence to the conclusion that the observed effect for Germany is not statistically meaningful and plasubily spurious. Overall, the causal analysis so far has not indicated the nuclear phase-out led to a meaningful increase in fossil fuel electricity generation in Germany during the first year.
+
+### Bayesian Structural Time Series {.unnumbered}
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+bsts_estimates = read_csv(paste0(getwd(), "/..", "/data/clean/bsts_model_estimates.csv"))
+```
+
+As stated above, I implement the Bayesian structural time series model using the `CausalImpact` R package. I show the model's predicted values compared with the observed values in @fig-bsts_pred. Like the SCM implementation, the model predictions appear to follow the general trend in the data during the pre-treatment period—now complemented with the notable benefit of Bayesian uncertainty intervals.
+
+![Predicted values from BSTS model](../plots/2023-08-23-chart_bsts_predicted_monthly.png){#fig-bsts_pred}
+
+In the post-intervention period, Germany’s electricity generation from fossil fuels averaged approximately 15.2 TWh. With `CausalImpact`, I estimate that if Germany's nuclear plants had not been closed, generation would have averaged `r round((bsts_estimates |> filter(type == "Average") |> pull(Pred)) * MWH_TO_TWH, 1)` TWh. The difference between these values, `r round(15.2 - (bsts_estimates |> filter(type == "Average") |> pull(Pred)) * MWH_TO_TWH, 1)` TWh, represents the estimated causal effect of the nuclear plant closures. While this suggests that the closures led to an increase in fossil fuel electricity generation, the 95% prediction interval ranges from `r round((bsts_estimates |> filter(type == "Average") |> pull(AbsEffect.lower)) * MWH_TO_TWH, 1)` TWh to `r round((bsts_estimates |> filter(type == "Average") |> pull(AbsEffect.upper)) * MWH_TO_TWH, 1)` TWh, indicating a high level of uncertainty around this point estimate.
+
+Expressed in relative terms, the increase amounts to approximately `r round((bsts_estimates |> filter(type == "Average") |> pull(RelEffect))*100, 0)`%, with a 95% prediction interval ranging from a decrease of `r round((bsts_estimates |> filter(type == "Average") |> pull(RelEffect.lower))*100, 0)`% to an increase of `r round((bsts_estimates |> filter(type == "Average") |> pull(RelEffect.upper))*100, 0)`%. This wide range underscores the inherent uncertainties associated with the causal inference process in this context. While the results seem to indicate a positive effect of the nuclear plant closures on fossil fuel electricity generation, the effect is not statistically significant over the entire post-intervention period, as the p-value stands at `r round((bsts_estimates |> filter(type == "Average") |> pull(RelEffect)), 2)`. Such a finding suggests that such a result could plausibly be the result of random variability. This is visible in @fig-bsts_residuals and @fig-bsts_cumulative, which show that the uncertainty intervals for the pointwise and cumulative treatment effects include zero.
+
+![Treatment effect estimated using BSTS model](../plots/2023-08-23-chart_bsts_residuals_monthly.png){#fig-bsts_residuals}
+
+![Cumulative treatment effect estimated using BSTS model](../plots/2023-08-23-chart_bsts_residuals_cum_monthly.png){#fig-bsts_cumulative}
+
+### Gaussian Process Regression {.unnumbered}
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+gpr_estimates = read_csv(paste0(getwd(), "/..", "/data/clean/gpr_estimates.csv"))
+```
+
+In implementing the GPR approach, I adopt a combination of exponential and white noise kernels. The choice was made given the assumption that the data might exhibit smooth trends but might also contain noise requires explicit accounting for. A series of constraints were applied to the kernel hyperparameters, ensuring the stability and interpretability of the model's results.
+
+After loading the data and preprocessing, I scaled the dataset between 0 and 1 to ease the optimization process. The data was divided into pre-treatment (for training) and post-treatment (for testing) periods, respecting the date of the nuclear plant closures in 2021 as the pivotal moment.
+
+To construct the initial GPR model, I utilized all available features, which included observations for the variable of interest for each country along with temperature measurements for Germany. The exponential kernel's length scales and the variances of both exponential and white noise kernels were bounded to prevent both overfitting and overflow errors, and to ensure the results remained within an interpretable range. After fitting the model on the entire pre-treatment dataset, a preliminary assessment revealed the model's performance on both training and test data, which was quantified using RMSE.
+
+Subsequently, I prioritized the exploration of feature importance. GPR provides a natural, if unitless, way to assess the relevance of different predictors via the length scales of the kernel. Features with shorter length scales have more impact on predictions, whereas features with longer length scales have less impact. The cumulative importance of features was calculated, and I observed that only a subset of the initial features was required to produce nearly 100% of the model's predictive power.
+
+Based on this observation, I refined the GPR model by incorporating only those features that cumulatively contributed significantly to the model's explanatory power. A second round of constraints was identified and applied to the kernel hyperparameters to tailor the model to this reduced set of features. This streamlined model was then re-optimized and assessed on both the training and testing datasets.
+
+Visual representations of the GPR predictions for Germany's fossil fuel electricity generation were created. In @fig-gpr_pred the model's predictions are shown alongside observed values and 95% credible intervals produced using samples from the posterior predictive distribution. It was more clear than with any other model that GPR replicated the seasonal patterns and the overarching trend in the data. 
+
+![Predicted values from GPR model](../plots/2023-08-23-chart_gpr_predictions_monthly.png){#fig-gpr_pred}
+
+However, the results tell much the same story as before. The model estimated the average causal effect to be `r round((gpr_estimates |> filter(Metric == "Causal Effect") |> pull(value))*MWH_TO_TWH, 2)` TWh. This corresponds with an estimated cumulative effect of `r round((gpr_estimates |> filter(Metric == "Sum Effect") |> pull(value))*MWH_TO_TWH, 2)` TWh over the 12-month post-treatment period. As before, zero is well inside the credible intervals for both values.
+
+![Treatment effect estimated using GPR model](../plots/2023-08-23-chart_gpr_residuals_monthly.png){#fig-gpr-residuals}
+
+![Cumulative treatment effect estimated using GPR model](../plots/2023-08-23-chart_gpr_residuals_cum_monthly.png){#fig-gpr-cumulative}
+
+Sensitivity analyses were additionally performed. Various features were sequentially omitted to gauge the robustness of the model's predictions. These exercises indicated that the GPR model's estimates were consistent, thereby reinforcing my confidence in its capability to offer meaningful insights into the effects of the nuclear power plant closures on fossil fuel electricity generation in Germany.
+
+### Summary
+
+@tbl-performance compares the out-of-sample predictive performance of the four causal inference methods on both the pre-treatment and post-treatment data. Predictive accuracy is quantified using the root mean squared error metric.
+
+On the pre-treatment data, Gaussian process regression achieved the lowest RMSE, indicating it most accurately captured the underlying generative process during this period. The SCM and BSTS models attained higher but comparable errors. As expected, the simplicity of the differences-in-differences approach resulted in the poorest out-of-sample fit.
+
+The relative predictive accuracy remains consistent in the post-treatment period. Gaussian process regression again outperformed the other techniques with the lowest RMSE of 904,171. BSTS saw only a marginal increase in error to 1.09 million. SCM and DiD experienced more substantial deteriorations in fit to approximately 1.35 and 2.47 million, potentially indicative of their stronger modeling assumptions.
+
+Overall, the GPR model's superior predictive performance underscores the value of flexible nonparametric modeling for this time series forecasting task. BSTS also provides reasonable fits, lending support for its state space approach to distinguishing trends and seasonality. The SCM and DiD methods appear inadequately flexible to accurately extrapolate patterns beyond the training data.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: tbl-performance
+#| tbl-cap: "Performance comparison of causal inference methods"
+
+did_performance <- read_csv(paste0(getwd(), "/..", "/data/clean/did_performance.csv")) |>
+  transmute(Method = "DiD", Treatment = if_else(treatment_period == "train", "pre", "post"), RMSE = rmse)
+
+scm_performance <- read_csv(paste0(getwd(), "/..", "/data/clean/scm_performance.csv")) |>
+  transmute(Method = "SCM", Treatment = if_else(type == "train", "pre", "post"), RMSE = rmse)
+
+bsts_performance <- read_csv(paste0(getwd(), "/..", "/data/clean/bsts_performance.csv")) |>
+  transmute(Method = "BSTS", Treatment, RMSE = rmse)
+
+gpr_performance <- read_csv(paste0(getwd(), "/..", "/data/clean/gpr_performance.csv")) |>
+  transmute(Method = "GPR", Treatment, RMSE = rmse)
+
+performance <- bind_rows(
+  did_performance,
+  scm_performance,
+  bsts_performance,
+  gpr_performance
+) |>
+arrange(desc(Treatment), RMSE)
+
+performance |>
+  # filter(Treatment == "pre") |>
+  knitr::kable(booktabs = TRUE, linesep = "") |>
+  kableExtra::kable_styling(latex_options = c("striped", "hold_position"), font_size = 8)
+```
+
+
+Turning to the @tbl-estimates, it is apparent that the four methods produce inconsistent point estimates of the treatment effect. This likely reflects their different modeling assumptions and biases. However, it is noteworthy that the estimates broadly span a range centered around a minor positive or negative effect.
+
+GPR, and BSTS yield modest positive point estimates for the mean monthly effect of 188,000 and 438,000 MWh. SCM gives a higher value of 1.1 million MWh. DiD appears the outlier at -568,000 MWh. Examining the cumulative effects tells a similar story.
+
+Given the uncertainties involved, placing emphasis on the precise point estimates risks overinterpreting noisy signals. But the overall convergence around marginal effects provides mutual corroboration. This triangulation across varied methods strengthens confidence in the conclusion that Germany's nuclear phase-out did not drastically increase fossil fuel reliance over the examined time horizon.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| label: tbl-estimates
+#| tbl-cap: "Estimate of causal effect from each model"
+
+# gpr_estimates
+# bsts_estimates
+# scm_effect
+did_estimate <- read_csv(paste0(getwd(), "/..", "/data/clean/did_estimate.csv")) 
+
+bind_rows(
+  gpr_estimates |>
+    transmute(Model = "GPR", Estimate = if_else(Metric == "Sum Effect", "cumulative", "mean"), Value = value),
+  bsts_estimates |>
+    select(type, Actual, Pred) |>
+    mutate(diff = Actual - Pred) |>
+    transmute(Model = "BSTS", Estimate = if_else(type == "Average", "mean", "cumulative"), Value = diff),
+  scm_effect |>
+    filter(str_detect(metric, "Estimated cumulative effect|Estimated mean effect")) |>
+    mutate(Estimate = if_else(str_detect(metric, "cumulative"), "cumulative", "mean"))|>
+    transmute(Model = "SCM", Estimate, Value = mwh),
+    tribble(
+      ~Model, ~Estimate, ~Value,
+      "DiD", "mean", (did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate)),
+      "DiD", "cumulative", (did_model_results |> filter(term == "treatment_period:treatment_group") |> pull(estimate))*12
+    )
+  # data.frame(Model = "DiD", Estimate = "mean", Value = did_estimate |> pull(pred) |> diff())
+) |>
+  arrange(desc(Estimate), Value) |>
+  knitr::kable(booktabs = TRUE, linesep = "") |>
+  kableExtra::kable_styling(latex_options = c("striped", "hold_position"), font_size = 8)
+```
+
+## Discussion
+
+The results obtained from the four methods showcase some notable contrasts, while also reinforcing a consistent narrative regarding the effects of Germany's nuclear phase-out. Across the board, the estimates imply at most a marginal impact on fossil fuel electricity generation in the year following the closure of the country's remaining reactors. However, differences emerge in the precision and certainty ascribed to these findings.
+
+### Causal Effect
+
+The simplicity of the differences-in-differences approach yields an interpretable point estimate suggesting a minor decrease in fossil fuel generation post-intervention. Yet the wide confidence interval underscores the uncertainty in quantifying the effect. The parallel trends assumption appears reasonably satisfied, but the model does not account for time- and potentially space-varying confounders like the Ukraine war that could bias results. The synthetic control method provides improved fit over the pre-treatment period. But the estimated positive effect seems spuriously constant, and the method lacks inherent uncertainty quantification. 
+
+The Bayesian structural time series model adds more flexibility through its latent components. The predictive intervals widen compared to the point estimates from the previous models, accurately reflecting the uncertainties involved. However, its linear regression basis may not capture intricate temporal dynamics as effectively as nonparametric alternatives. This is evidenced by its weaker predictive performance. Gaussian process regression combines flexible nonparametric modeling with principled Bayesian uncertainty characterization. The automatic relevance determination technique for input selection prevents overfitting. The end result is an interpretable causal effect estimate with credibility intervals that hedge against overconfident conclusions.
+
+### Feature Selection
+
+A key differentiator between methods is how they perform feature selection, or determine which control units and covariates to include in the model. DiD uses pre-trends and statistical tests to filter control countries. But this may still include extraneous variables. The SCM optimization provides intuitive weighting, but lacks uncertainty and may overfit. GPR's automatic relevance determination technique offers a more robust data-driven approach. By learning the lengthscales as feature importance measures, it incorporates only predictors vital to the model's fit. This prevents overfitting while retaining flexibility. Moreover, the reduced feature set lightens computational demands and enhances interpretability without sacrificing performance. The GPR model with ARD-based feature selection thus demonstrates the power of principled Bayesian approaches for input variable selection in causal inference.
+
+The differences-in-differences methodology filters control units based on statistical tests for pre-treatment parallel trends. However, while removing countries with significantly different pre-period outcomes guards against violations of a key assumption, this approach risks excluding useful information. The binary decision of retaining or dropping units ignores nuances in their potential similarities. DiD does not leverage continuous measures of pre-treatment fit when selecting controls. In contrast, the SCM directly incorporates fit via the weight optimization. But its hard thresholding of choosing only the best fitting units can lead to overfitting and spurious matches. The GPR model with ARD takes a more graded approach. By learning a continuous importance measure through the lengthscales, it soft thresholds inputs based on their explanatory power. Less relevant inputs are not discarded but simply downweighted. This retains useful signals without overfitting to noise.
+
+The probabilistic nature of GPR's feature selection allows for principled uncertainty characterization regarding the relevance of inputs. In a frequentist paradigm like DiD or SCM, covariates are either included or excluded based on thresholding. This binary view cannot capture uncertainties. But GPR's Bayesian derivation provides posterior credibility intervals around lengthscale estimates. Narrower intervals indicate higher confidence in an input's low or high importance. Wider intervals reflect greater ambiguity. This principled measure of uncertainty is lost in traditional feature selection but adds valuable nuance regarding the role of different predictors. Overall, GPR with ARD highlights the advantages of Bayesian modeling for input variable selection - offering a more robust, flexible, and uncertainty-aware approach than alternatives like pre-trend filtering or weight optimization.
+
+![Feature selection comparison](../plots/2023-08-23-chart_features.png){#fig-feature-selection}
+
+@fig-feature-selection shows a somewhat crude comparison of the different methods used for feature selection. The portion labeled DiD displays bars at heights one and zero for countries which have been included or excluded from the donor pool, respectively. The SCM portion shows the weights assigned to each country by the optimization routine. The BSTS portion shows the inclusion probability for each country, calculated by `CausalImpact`. The conditional probability that a coefficient is positive is also available, but it is not shown here for simplicity. The GPR portion shows the inverse lengthscales of the kernel for each input variable. The inverse lengthscales are scaled between zero and one for ease of comparison. 
+
+Viewed all together, a somewhat gratifying picture emerges. The methods appear to agree on the "importance" of the most proximate countries to Germany. Poland, Estonia, and Belgium are assigned high importance by all four methods. Curiously the temperature covariate is assigned low importance by all models. The SCM and DiD models do not explicitly incorporate temperature measurements, but they do include countries with similar climates to Germany.
+
+### Uncertainty
+
+The marginal positive effects seen in some models could be spurious rather than indicative of an actual post-intervention increase in fossil fuel generation. Several factors support this conservative interpretation. The uncertainties around the point estimates are substantial, as revealed by DiD and GPR—despite models seeming relatively robust to changes in thier specifications, as visible under leave-one-out perturbations of the synthetic control. Known contemporaneous shocks like the Ukraine war and gas supply constraints likely impacted the dynamics in ways not fully captured by the models. In any case, the apparent lack of an unambiguous rise in fossil fuel generation contrasts with the aftermath of Germany's 2011 nuclear phase-out decision. Several factors may explain this divergence. In the interim, investments in renewables expanded Germany's wind and solar capacity, potentially offsetting the nuclear shortfall. Market liberalization enabled greater cross-border power trading to meet demand. Energy efficiency policies may have tempered electricity requirements. Furthermore, the plants shuttered in 2021 accounted for a smaller share of supply versus 2011's immediate closure of 8 reactors. The lead time could have allowed for gradual adaptation. Lastly, exogenous events like the pandemic and Ukraine war make discerning the isolated effect of the closures difficult. Disentangling these myriad influences necessitates a holistic examination beyond the models employed presently. Ultimately, the hypothesis that nuclear reductions inexorably increase fossil fuels requires re-evaluation given Germany's changing energy landscape. A future approach could incorporate a richer set of covariates to better capture the complex dynamics at play; another approach could be using a method like multi-task Gaussian process regression to jointly model the effects of the nuclear phase-out on different energy sources—particularly renewables and imports—which could provide a more complete picture. More granular data or more powerful modeling tool will allow for more definitive claims around the closure effects amidst these compounded uncertainties. But the current results demonstrate the feasibility of data-driven causal inference on this practically relevant issue.
+
+{{< pagebreak >}}
+
+# Conclusion {#sec-conclusion}
+
+## Summary of Key Findings
+
+This study aimed to estimate the causal effect of Germany's 2021 nuclear power plant closures on the country's electricity generation from fossil fuel sources during 2022. The analyses implemented four complementary causal inference techniques - differences-in-differences, synthetic control modeling, Bayesian structural time series, and Gaussian process regression - on a panel dataset of European countries' electricity generation over time.  
+
+The results consistently point to a marginal impact, at most, of the 2021 nuclear shutdowns on fossil fuel reliance in Germany. The differences-in-differences model yielded a point estimate implying a minor decrease in fossil fuel generation following the closures. However, wide confidence intervals indicated substantial uncertainty around quantifying the effect precisely. The synthetic control method provided improved pre-treatment fit but overestimated post-treatment effects as implausibly constant over time. It also lacked inherent uncertainty characterization. Bayesian time series modeling added more flexibility through latent components and more appropriate predictive intervals. Gaussian process regression combined nonparametric flexibility with principled Bayesian uncertainty estimates. Its automatic relevance determination technique for input selection warded off overfitting concerns.
+
+Across techniques, the nuclear phase-out does not appear to have caused a statistically significant increase in fossil fuel-based electricity generation during the first year. While marginal positive effects emerged in some models, uncertainty levels give reason to doubt these represent true effects rather than spurious signals. The results appear relatively robust to perturbations in model specifications. Overall, the hypothesis that nuclear reductions inexorably increase fossil fuel reliance requires re-evaluation given Germany's changing energy landscape.
+
+### Substantive and Methodological Implications
+
+Substantively, the findings provide insights relevant to nuclear policy and Germany's energy transition, while warranting prudent qualification. The lack of clear evidence that phasing out nuclear generation increased fossil fuel reliance contrasts with some expectations. However, Germany's investments in renewables and interconnected grid may represent an overly optimistic case. Nuclear closures could still risk increasing emissions in less prepared systems. Policymakers should therefore update beliefs on the interconnectedness of nuclear, renewables, and fossil fuels cautiously. Though the results suggest possible pathways to mitigate trade-offs, phasing out low-carbon nuclear energy in isolation likely remains inadvisable from a climate perspective.  
+
+Methodologically, applying multiple complementary causal inference techniques proved illuminating. While all methods have limitations, their combined perspectives lent greater confidence in the consistency of the findings. Gaussian process regression demonstrated particular value through its flexible, nonparametric modeling and automatic relevance determination for input selection. It signficantly improved on other methods in capturing the variability in the outcome of interest. Its principled uncertainty quantification avoided overconfident conclusions. The analysis elucidated the relative merits of differences-in-differences, synthetic controls, Bayesian time series, and Gaussian processes for inference on observational time series data. It exemplified how leveraging their respective strengths provides a richer understanding than any single method alone.
+
+### Limitations and Future Work 
+
+While the study provides valuable insights, it has limitations that could be addressed by future work. The data consists of country-level electricity generation at a monthly resolution. More granular data below the country level could support analysis of regional dynamics within countries (at higher frequencies, signals within the data become difficult to detect as the noise increases considerably). The time period available also constrains the pre-treatment window for training models—resource-intensive approaches as in @Jarvis2019 can help bypass limitations on data availability in this case. Additionally, the set of predictor variables is limited to only one, hampering control of potential confounders. This analysis faced the challenge of considering a treatment effect with broad-reaching impacts, disqualifying many traditionally valuable covariates for this context, such as electricity prices, demand levels, and power imports. All of these would certainly have changed in response to the 2021 power plant closures and so could not act as controls within this framework.
+
+The models themselves also have shortcomings, which have been discussed in the relevant sections. The differences-in-differences estimates could suffer from biases if time-varying confounders affected the parallel trends assumption. The synthetic control approach risks overfitting and assumes no spillovers between units. The Bayesian structural time series as implemented in `CausalImpact` relies on modeling assumptions about latent components and assumes that the "relationship between covariates and treated time series, as established during the pre-period, remains stable throughout the post-period." Gaussian process regression faces computational burdens scaling to massive datasets. Applying recent advances like deep Gaussian processes could alleviate this.
+
+Future work could strengthen the analysis along multiple dimensions. Region- or even plant-level data on electricity generation, prices, and external drivers would support more granular modeling. Expanding the panel to include additional nuclear-phase out countries could bolster synthetic controls. Incorporating richer sets of covariates and applying methods robust to observed confounders like regression discontinuity could isolate the effects of interest. Shifting to a multi-task modeling framework—for example, multi-task Gaussian processes—could capture treatment effects across energy sources, providing a more holistic view. Overall, the limitations of data and methods leave room for significant analytical refinements to better disentangle the complex dynamics around nuclear energy transitions. But the feasibility demonstrated points towards productive avenues for further investigation.
+
+### Concluding Remarks
+
+This study estimated the causal effect of Germany's 2021 nuclear power plant closures on the country's fossil fuel-based electricity generation in 2022. The results across four complementary causal inference techniques consistently point to a marginal impact, at most. While limitations of the data and models necessitate judicious interpretation, the findings challenge expectations that phasing out nuclear generation inevitably increases fossil fuel reliance in the short term. Germany's changing energy landscape underscores the complexity of managing transitions away from nuclear power. 
+
+The analysis elucidates how leveraging multiple methods provides richer insights than any one approach alone. It particularly highlights the value of nonparametric Bayesian modeling with automatic relevance determination for input selection. The feasibility of data-driven causal inference on this empirical issue demonstrates promise for strengthening future investigations. With care taken in extrapolating the context-specific implications, the study offers lessons for both academic literature and policy discussions around nuclear power transitions. While substantial questions remain unresolved, the multi-faceted perspectives provided by complementing flexible modeling with principled uncertainty quantification move constructively towards illuminating the interconnected dynamics shaping decarbonization pathways.
+
+{{< pagebreak >}}
+
+# Bibliography {.unnumbered}
+
+<!-- ::: {#bib}
+::: -->

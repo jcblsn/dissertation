@@ -1,0 +1,61 @@
+$if(has-frontmatter)$
+\frontmatter
+$endif$
+
+% %------------------------------------------------
+% % Declaring new geometry for the title page only.
+% \newgeometry{margin=2cm}
+% %------------------------------------------------
+
+
+$if(title)$
+$if(beamer)$
+\frame{\titlepage}
+$else$
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+
+% Department of Statistics 2022-2023
+{\large Department of Statistics 2022-23\\}
+\vspace{1cm}
+
+% Paper title
+{\Large\bfseries $title$}
+\vspace{1cm}
+
+% Candidate Number
+{\large Candidate Number: 52187\\}
+% {\large Jacob Eliason\\}
+\vspace{9cm}
+\begin{center}
+
+% Logo
+$if(logo)$
+\includegraphics[width=1.5cm]{$logo$}
+$endif$
+
+\end{center}
+\vspace{1cm}
+
+% Optional note
+$if(note)$
+{\small $note$}
+$endif$
+
+\vspace{3cm}
+\end{titlepage}
+
+% %-----------------------------------------------
+% % Ending the declared geometry for the title page
+% % and restore the geometry for other pages
+% \restoregeometry
+% %-----------------------------------------------
+
+$endif$
+$if(abstract)$
+\begin{abstract}
+$abstract$
+\end{abstract}
+$endif$
+$endif$
